@@ -1,212 +1,143 @@
-**# Comm-Log Send Reconciliation**
+# Comm-Log Send Reconciliation
 
+## Objective
 
+Reproduce Finance's reported `target_base` of **22** for merchant `501`
+for October 2026 across the Diwali campaigns.
 
-**## Objective**
+The goal was to reconcile the initial raw send-attempt count with the
+reported Finance metric by investigating campaign eligibility, retry
+chains, and standalone campaign behavior.
 
+---
 
+## Dataset
 
-**Reproduce Finance's reported `target\_base` of 22 for**
+The analysis uses the supplied SQLite database:
 
-**merchant 501 for October 2026 across the Diwali campaigns.**
+- `campaign`
+- `communication_log`
 
+### Scope
 
+- **Merchant:** `501`
+- **Period:** October 2026
+- **Communication type:** `2` (Campaign)
+- **Expected Finance `target_base`:** `22`
 
-**## Dataset**
+Each row in `communication_log` represents an individual send attempt.
+The `campaign.parent_id` field identifies retry relationships between
+campaigns.
 
+---
 
+## Business Rules
 
-**The analysis uses the supplied SQLite database containing:**
+The investigation followed the rules provided in the data dictionary:
 
+1. A campaign is eligible for reporting only when its creation workflow
+   has cleared and `processing_status = 'processed'`.
+2. `approval_awaiting` campaigns are not included in official reporting.
+3. A campaign with a `parent_id` is a retry of its parent campaign.
+4. Customers appearing across a retry chain represent the same
+   underlying communication and are counted once.
+5. Standalone campaigns are different: every send event counts separately,
+   even when the same customer appears more than once.
 
+---
 
-**- `campaign`**
+## Investigation
 
-**- `communication\_log`**
+### Step 0 — Naive Count
 
+The first query counted every row in `communication_log`.
 
+**Result: 30 send attempts**
 
-**The scope is:**
+This was the starting point because each row represents one individual
+send attempt.
 
+---
 
+### Step 1 — Campaign Eligibility
 
-**- Merchant: 501**
+Campaign `9004` was identified as `approval_awaiting`.
 
-**- Period: October 2026**
+Although four communication-log rows existed for this campaign, the
+campaign had not cleared the approval workflow and therefore was not
+eligible for official reporting.
 
-**- Communication type: `2` (Campaign)**
+**Reconciliation:**
 
+`30 → 26`
 
+**Adjustment: -4**
 
-**## Investigation**
+---
 
+### Step 2 — Retry Chain: 9001 → 9002 → 9003
 
+Campaigns `9002` and `9003` are retries connected to campaign `9001`.
 
-**### Step 0 — Naive count**
+This chain contained **13 send attempts**, but only **10 distinct
+customers**.
 
+Customers who appeared across multiple campaigns in this retry chain
+were treated as one underlying communication.
 
+**Reconciliation:**
 
-**The initial query counted all rows in `communication\_log`.**
+`26 → 23`
 
+**Adjustment: -3**
 
+---
 
-**\*\*Result: 30\*\***
+### Step 3 — Retry Chain: 9201 → 9202
 
+Campaign `9202` is a retry of campaign `9201`.
 
+This chain contained **6 send attempts**, representing **5 distinct
+customers**.
 
-**This is the naive starting point because each row represents an individual send attempt.**
+The repeated customer within the retry chain was therefore counted once.
 
+**Reconciliation:**
 
+`23 → 22`
 
-**### Step 1 — Campaign eligibility**
+**Adjustment: -1**
 
+---
 
+### Standalone Campaign: 9101
 
-**Campaign 9004 was identified as `approval\_awaiting`.**
+Campaign `9101` is standalone and does not belong to a retry chain.
 
+Customer `C20` appears twice in the campaign. Both records were retained
+because standalone campaigns count each send as a separate event.
 
+Therefore, `COUNT(DISTINCT customer_id)` cannot be applied indiscriminately
+across the entire dataset.
 
-**The data dictionary states that a campaign is included in official**
+---
 
-**reporting only when its creation workflow has cleared and its**
+## Reconciliation Bridge
 
-**processing workflow has completed.**
+| Step | Description | Result | Adjustment |
+|---|---|---:|---:|
+| 0 | Naive count of `communication_log` rows | 30 | — |
+| 1 | Exclude ineligible campaign `9004` | 26 | -4 |
+| 2 | Deduplicate retry chain `9001 → 9002 → 9003` | 23 | -3 |
+| 3 | Deduplicate retry chain `9201 → 9202` | 22 | -1 |
+| **Final** | **`target_base`** | **22** | **—** |
 
+### Reconciliation Summary
 
-
-**Campaign 9004 had 4 send attempts, so these were excluded.**
-
-
-
-**\*\*30 → 26\*\***
-
-
-
-**### Step 2 — Retry chain: 9001 → 9002 → 9003**
-
-
-
-**Campaigns 9002 and 9003 are retries in the same campaign chain.**
-
-
-
-**Customers appearing in multiple campaigns within the retry chain**
-
-**represent the same underlying communication and are therefore**
-
-**counted once.**
-
-
-
-**The chain contained 13 send attempts representing 10 distinct**
-
-**customers.**
-
-
-
-**\*\*26 → 23\*\***
-
-
-
-**### Step 3 — Retry chain: 9201 → 9202**
-
-
-
-**Campaign 9202 is a retry of campaign 9201.**
-
-
-
-**The chain contained 6 send attempts representing 5 distinct**
-
-**customers.**
-
-
-
-**\*\*23 → 22\*\***
-
-
-
-**### Standalone campaign: 9101**
-
-
-
-**Campaign 9101 is standalone.**
-
-
-
-**Customer C20 appears twice, but both rows are retained because**
-
-**standalone campaigns count each send as a separate event.**
-
-
-
-**Therefore, `COUNT(DISTINCT customer\_id)` was not applied to this**
-
-**campaign.**
-
-
-
-**## Reconciliation**
-
-
-
-**| Step | Description | Result | Change |**
-
-**|---|---|---:|---:|**
-
-**| 0 | Naive count of `communication\_log` rows | 30 | — |**
-
-**| 1 | Exclude ineligible campaign 9004 | 26 | -4 |**
-
-**| 2 | Collapse retry chain 9001 → 9002 → 9003 | 23 | -3 |**
-
-**| 3 | Collapse retry chain 9201 → 9202 | 22 | -1 |**
-
-**| Final | `target\_base` | \*\*22\*\* | — |**
-
-
-
-**## Final SQL**
-
-
-
-**The final reconciliation query is available in:**
-
-
-
-**`SQL/reconciliation.sql`**
-
-
-
-**The investigation queries are available in:**
-
-
-
-**`SQL/investigation.sql`**
-
-
-
-**## Surprising Observation**
-
-
-
-**One thing that surprised me was that a customer can appear more than**
-
-**once within the same campaign without those records being considered**
-
-**a retry. Campaign 9101 contains two send events for C20, and both**
-
-**must be retained because the campaign is standalone. This means that**
-
-**blindly applying `COUNT(DISTINCT customer\_id)` across all campaigns**
-
-**would produce the wrong result.**
-
-
-
-**## Result**
-
-
-
-**\*\*Final target\_base: 22\*\***
-
+```text
+30  naive send-attempt count
+ -4 ineligible campaign 9004
+ -3 duplicate retry attempts in 9001 → 9002 → 9003
+ -1 duplicate retry attempt in 9201 → 9202
+-----------------------------------------------
+22  final target_base
